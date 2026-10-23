@@ -1945,6 +1945,13 @@ if(BUILD_TESTING)
         add_test(NAME guest_raise_in_host_code COMMAND guest_raise_in_host_code_tests)
         set_tests_properties(guest_raise_in_host_code PROPERTIES TIMEOUT 30 ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        add_test_executable(guest_raise_leaves_host_code_tests ${LIBS_INCLUDE_DIR}/tests/GuestRaiseLeavesHostCode.cpp)
+        target_include_directories(guest_raise_leaves_host_code_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_raise_leaves_host_code_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_raise_leaves_host_code_tests)
+        add_test(NAME guest_raise_leaves_host_code COMMAND guest_raise_leaves_host_code_tests)
+        set_tests_properties(guest_raise_leaves_host_code PROPERTIES TIMEOUT 60 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
         add_test_executable(guest_mutex_contention_tests ${LIBS_INCLUDE_DIR}/tests/GuestMutexContention.cpp)
         target_include_directories(guest_mutex_contention_tests PRIVATE ${LIBS_INCLUDE_DIR})
         target_link_libraries(guest_mutex_contention_tests PRIVATE libkernel libc)
