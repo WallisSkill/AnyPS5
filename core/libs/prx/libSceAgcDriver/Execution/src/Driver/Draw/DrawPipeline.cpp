@@ -411,6 +411,7 @@ void DrawPipeline::run() {
         }
         std::lock_guard lock(mutex);
         countWrites(items.front().writes, false);
+        retiredWrites[retiredItems.load(std::memory_order_relaxed) % RetiredWriteHistory].assign(items.front().writes.begin(), items.front().writes.end());
         retired.push_back(std::move(items.front()));
         items.pop_front();
         retiredItems.fetch_add(1, std::memory_order_release);
@@ -526,25 +527,23 @@ void DrawPipeline::countWrites(const std::vector<Range>& writes, bool added) {
 }
 
 DrawPipeline::Watch DrawPipeline::WatchWrites() {
-    if (!Busy()) return {Retired(), 0, {}};
-    std::lock_guard lock(mutex);
-    Watch watch{retiredItems.load(std::memory_order_relaxed), items.size(), {}};
-    for (const auto& item : items) watch.writes.insert(watch.writes.end(), item.writes.begin(), item.writes.end());
-    return watch;
+    return {Retired()};
 }
 
 bool DrawPipeline::WrittenSince(const Watch& watch, const std::vector<Range>& reads) {
-    const auto overlaps = [&reads](const std::vector<Range>& writes) {
-        return std::any_of(reads.begin(), reads.end(), [&writes](const Range& read) {
-            return std::any_of(writes.begin(), writes.end(), [&read](const Range& write) { return read.first < write.second && write.first < read.second; });
-        });
+    const auto overlaps = [&reads](const Range& write) {
+        return std::any_of(reads.begin(), reads.end(), [&write](const Range& read) { return read.first < write.second && write.first < read.second; });
     };
     if (DrawFinisher::Overlap() && DrawFinisher::Get().PendingOverlapsAny(reads)) return true;
     std::lock_guard lock(mutex);
-    if (std::any_of(items.begin(), items.end(), [&](const Item& item) { return overlaps(item.writes); })) return true;
+    if (std::any_of(queuedWrites.begin(), queuedWrites.end(), [&](const auto& queued) { return overlaps(queued.first); })) return true;
     const auto retiredNow = retiredItems.load(std::memory_order_relaxed);
-    if (retiredNow == watch.retired) return false;
-    return retiredNow - watch.retired > watch.items || overlaps(watch.writes);
+    if (retiredNow - watch.retired > RetiredWriteHistory) return true;
+    for (auto item = watch.retired; item < retiredNow; ++item) {
+        const auto& writes = retiredWrites[item % RetiredWriteHistory];
+        if (std::any_of(writes.begin(), writes.end(), overlaps)) return true;
+    }
+    return false;
 }
 
 bool DrawPipeline::Busy() const {

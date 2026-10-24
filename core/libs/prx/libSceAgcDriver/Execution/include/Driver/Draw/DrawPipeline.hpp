@@ -26,8 +26,6 @@ public:
     using Range = std::pair<std::uint64_t, std::uint64_t>;
     struct Watch {
         std::uint64_t retired = 0;
-        std::size_t items = 0;
-        std::vector<Range> writes;
     };
     enum class DrainReason : std::uint8_t { Packet, Flush, Labels, Capture, Indirect, Submission, Count };
 
@@ -85,6 +83,8 @@ private:
     std::exception_ptr failure;
     std::atomic<std::size_t> outstanding{0};
     std::atomic<std::uint64_t> retiredItems{0};
+    static constexpr std::uint64_t RetiredWriteHistory = 512;
+    std::array<std::vector<Range>, RetiredWriteHistory> retiredWrites;
     std::atomic<std::uint64_t> decodeDrains{0};
     std::uint64_t reportedDecodeDrains = 0;
     std::uint32_t idleWaiters = 0;
