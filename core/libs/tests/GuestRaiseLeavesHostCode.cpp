@@ -31,12 +31,18 @@ static std::atomic<int> outsideImage{0};
 static std::atomic<bool> stop{false};
 static std::atomic<int> blockedRound{-1};
 static std::atomic<int> busyRound{-1};
+static std::atomic<int> alertableRound{-1};
+static std::atomic<bool> alertableSignaled{false};
+static std::atomic<int> insideAlertableWait{0};
+static std::atomic<DWORD> alertableThread{0};
 static HANDLE release = nullptr;
+static HANDLE alertableRelease = nullptr;
 
 static void APS5_VABI Handler(int, void* context) {
     std::uint64_t rip = 0;
     std::memcpy(&rip, static_cast<const unsigned char*>(context) + RipOffset, sizeof(rip));
     if (rip < imageBegin || rip >= imageEnd) outsideImage.fetch_add(1);
+    if (GetCurrentThreadId() == alertableThread.load() && !alertableSignaled.load()) insideAlertableWait.fetch_add(1);
     deliveries.fetch_add(1);
 }
 
@@ -60,6 +66,18 @@ static void* APS5_VABI Busy(void*) {
     return nullptr;
 }
 
+static void* APS5_VABI Alertable(void*) {
+    alertableThread.store(GetCurrentThreadId());
+    for (int round = 0; round < Rounds; ++round) {
+        alertableRound.store(round);
+        DWORD waited = WAIT_IO_COMPLETION;
+        while (waited == WAIT_IO_COMPLETION) waited = WaitForSingleObjectEx(alertableRelease, INFINITE, TRUE);
+        Require(waited == WAIT_OBJECT_0);
+        while (alertableRound.load() == round) std::this_thread::yield();
+    }
+    return nullptr;
+}
+
 static void WaitDeliveries(int expected) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (deliveries.load() < expected) {
@@ -74,7 +92,8 @@ int main() {
     imageBegin = reinterpret_cast<std::uintptr_t>(image);
     imageEnd = imageBegin + headers->OptionalHeader.SizeOfImage;
     release = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    Require(release != nullptr);
+    alertableRelease = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    Require(release != nullptr && alertableRelease != nullptr);
     Require(sceKernelInstallExceptionHandler(SigUsr1, reinterpret_cast<void*>(&Handler)) == 0);
 
     Pthread blocked = nullptr;
@@ -101,8 +120,27 @@ int main() {
     }
     Require(scePthreadJoin(busy, nullptr) == 0);
 
+    Pthread alertable = nullptr;
+    Require(scePthreadCreate(&alertable, nullptr, Alertable, nullptr, "in an alertable host wait") == 0);
+    for (int round = 0; round < Rounds; ++round) {
+        while (alertableRound.load() != round) std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        alertableSignaled.store(false);
+        const auto raisedAt = std::chrono::steady_clock::now();
+        Require(sceKernelRaiseException(alertable, SigUsr1) == 0);
+        Require(std::chrono::steady_clock::now() - raisedAt < std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        alertableSignaled.store(true);
+        Require(SetEvent(alertableRelease) != 0);
+        WaitDeliveries(2 * Rounds + round + 1);
+        alertableRound.store(round + Rounds);
+    }
+    Require(scePthreadJoin(alertable, nullptr) == 0);
+
     Require(sceKernelRemoveExceptionHandler(SigUsr1) == 0);
     CloseHandle(release);
-    std::printf("deliveries %d, outside the image %d\n", deliveries.load(), outsideImage.load());
+    CloseHandle(alertableRelease);
+    std::printf("deliveries %d, outside the image %d, inside an alertable host wait %d\n", deliveries.load(), outsideImage.load(), insideAlertableWait.load());
     Require(outsideImage.load() == 0);
+    Require(insideAlertableWait.load() == 0);
 }

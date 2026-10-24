@@ -291,7 +291,8 @@ struct QueuedDelivery {
     GuestExceptionHandler handler;
     int signum;
     std::atomic<bool> taken{false};
-    std::atomic<int> references{2};
+    std::atomic<bool> waiting{false};
+    std::atomic<int> references{1};
 };
 
 void ReleaseQueued(QueuedDelivery* queued) {
@@ -392,13 +393,13 @@ CodeKind RunningCode(DWORD64 rip, DWORD64& base) {
 
 enum class Attempt : std::uint8_t { Delivered, Exited, Host, Restoring };
 
-QueuedDelivery* QueueDelivery(HANDLE native, GuestExceptionHandler handler, int signum) {
-    auto* queued = new QueuedDelivery{handler, signum};
-    if (QueueUserAPC(WaitingEntry, native, reinterpret_cast<ULONG_PTR>(queued)) == 0) {
-        delete queued;
-        return nullptr;
-    }
-    return queued;
+bool QueueWaitingDelivery(HANDLE native, QueuedDelivery* queued) {
+    if (queued->waiting.exchange(true, std::memory_order_acq_rel)) return true;
+    queued->references.fetch_add(1, std::memory_order_relaxed);
+    if (QueueUserAPC(WaitingEntry, native, reinterpret_cast<ULONG_PTR>(queued)) != 0) return true;
+    queued->references.fetch_sub(1, std::memory_order_relaxed);
+    queued->waiting.store(false, std::memory_order_release);
+    return false;
 }
 
 void Redirect(HANDLE native, Delivery& delivery) {
@@ -692,9 +693,10 @@ Attempt TryDeliver(Pthread thread, HANDLE native, GuestExceptionHandler handler,
             continue;
         }
         if (thread->waitCount.load(std::memory_order_seq_cst) > 0) {
-            if (queued == nullptr) queued = QueueDelivery(native, handler, signum);
+            if (queued == nullptr) queued = new QueuedDelivery{handler, signum};
+            const bool accepted = QueueWaitingDelivery(native, queued);
             ResumeThread(native);
-            if (queued == nullptr) throw std::runtime_error("sceKernelRaiseException: cannot queue delivery to the waiting thread");
+            if (!accepted) throw std::runtime_error("sceKernelRaiseException: cannot queue delivery to the waiting thread");
             return Attempt::Delivered;
         }
         const bool restoring = RestoringContext(delivery.context.Rip);
@@ -712,7 +714,7 @@ Attempt TryDeliver(Pthread thread, HANDLE native, GuestExceptionHandler handler,
             Redirect(native, delivery);
             return Attempt::Delivered;
         }
-        if (running == CodeKind::Host && queued == nullptr) queued = QueueDelivery(native, handler, signum);
+        if (running == CodeKind::Host && queued == nullptr) queued = new QueuedDelivery{handler, signum};
         DWORD64 unknown = 0;
         if (arm != nullptr && running == CodeKind::Host && !restoring) ArmReturnBreak(native, delivery.context, queued, *arm, unknown);
         ResumeThread(native);
