@@ -39,6 +39,11 @@ ShaderRecompiler::ShaderVertexStageInfo DecodeOrderedVertexStageInfo(std::span<c
     if (!DrawPipeline::Active()) return decode();
     auto& queue = DrawPipeline::Queue0();
     const auto watch = queue.WatchWrites();
+    struct WatchEnd {
+        DrawPipeline& queue;
+        const DrawPipeline::Watch& watch;
+        ~WatchEnd() { queue.EndWatch(watch); }
+    } watchEnd{queue, watch};
     auto info = decode();
     if (!queue.Busy() && queue.Retired() == watch.retired) return info;
     std::vector<DrawPipeline::Range> ranges;

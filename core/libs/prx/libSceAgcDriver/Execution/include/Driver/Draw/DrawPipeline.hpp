@@ -26,6 +26,7 @@ public:
     using Range = std::pair<std::uint64_t, std::uint64_t>;
     struct Watch {
         std::uint64_t retired = 0;
+        bool registered = false;
     };
     enum class DrainReason : std::uint8_t { Packet, Flush, Labels, Capture, Indirect, Submission, Count };
 
@@ -47,6 +48,7 @@ public:
     bool Overlaps(std::uint64_t address, std::size_t bytes);
     bool OverlapsAny(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges);
     Watch WatchWrites();
+    void EndWatch(const Watch& watch);
     bool WrittenSince(const Watch& watch, const std::vector<Range>& reads);
     std::uint64_t Retired() const { return retiredItems.load(std::memory_order_acquire); }
     void NoteDecodeDrain() { decodeDrains.fetch_add(1, std::memory_order_relaxed); }
@@ -85,6 +87,7 @@ private:
     std::atomic<std::uint64_t> retiredItems{0};
     static constexpr std::uint64_t RetiredWriteHistory = 512;
     std::array<std::vector<Range>, RetiredWriteHistory> retiredWrites;
+    std::size_t watchers = 0;
     std::atomic<std::uint64_t> decodeDrains{0};
     std::uint64_t reportedDecodeDrains = 0;
     std::uint32_t idleWaiters = 0;

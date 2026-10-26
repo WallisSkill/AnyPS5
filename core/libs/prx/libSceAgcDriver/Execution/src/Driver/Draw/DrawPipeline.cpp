@@ -411,7 +411,7 @@ void DrawPipeline::run() {
         }
         std::lock_guard lock(mutex);
         countWrites(items.front().writes, false);
-        retiredWrites[retiredItems.load(std::memory_order_relaxed) % RetiredWriteHistory].assign(items.front().writes.begin(), items.front().writes.end());
+        if (watchers != 0) retiredWrites[retiredItems.load(std::memory_order_relaxed) % RetiredWriteHistory].assign(items.front().writes.begin(), items.front().writes.end());
         retired.push_back(std::move(items.front()));
         items.pop_front();
         retiredItems.fetch_add(1, std::memory_order_release);
@@ -527,7 +527,16 @@ void DrawPipeline::countWrites(const std::vector<Range>& writes, bool added) {
 }
 
 DrawPipeline::Watch DrawPipeline::WatchWrites() {
-    return {Retired()};
+    if (!Busy()) return {Retired(), false};
+    std::lock_guard lock(mutex);
+    ++watchers;
+    return {retiredItems.load(std::memory_order_relaxed), true};
+}
+
+void DrawPipeline::EndWatch(const Watch& watch) {
+    if (!watch.registered) return;
+    std::lock_guard lock(mutex);
+    --watchers;
 }
 
 bool DrawPipeline::WrittenSince(const Watch& watch, const std::vector<Range>& reads) {
@@ -538,7 +547,8 @@ bool DrawPipeline::WrittenSince(const Watch& watch, const std::vector<Range>& re
     std::lock_guard lock(mutex);
     if (std::any_of(queuedWrites.begin(), queuedWrites.end(), [&](const auto& queued) { return overlaps(queued.first); })) return true;
     const auto retiredNow = retiredItems.load(std::memory_order_relaxed);
-    if (retiredNow - watch.retired > RetiredWriteHistory) return true;
+    if (retiredNow == watch.retired) return false;
+    if (!watch.registered || retiredNow - watch.retired > RetiredWriteHistory) return true;
     for (auto item = watch.retired; item < retiredNow; ++item) {
         const auto& writes = retiredWrites[item % RetiredWriteHistory];
         if (std::any_of(writes.begin(), writes.end(), overlaps)) return true;
