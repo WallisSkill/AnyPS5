@@ -3527,15 +3527,25 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
     // else by the same lookups as the build (which refresh or replace them as guest memory changed):
     // they must hand back the very objects the set's views belong to. The build appended them stage
     // by stage, binding by binding, so the walk repeats that order.
+    struct WalkMismatch {
+        const char* what = nullptr;
+        std::size_t index = 0;
+        bool storage = false;
+    } mismatch;
     const auto fullWalk = [&](bool partial) {
         if (!partial) lastFullWalk = std::chrono::steady_clock::now();
         lookupLog().clear();
+        mismatch = {};
+        const auto miss = [&](const char* what, std::size_t index, bool storage = false) {
+            mismatch = {what, index, storage};
+            return false;
+        };
         const auto skipped = [&](std::size_t index) { return partial && index < textures.size() && !textures[index]->RefreshedPerUse(); };
         BuildLookups lookups;
         std::size_t textureIndex = 0;
         std::size_t storageIndex = 0;
         for (const auto& shader : shaders) {
-            if (shader.program == nullptr) return false;
+            if (shader.program == nullptr) return miss("a stage without a program at texture", textureIndex);
             for (const auto& binding : shader.program->bindings) {
                 if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages) continue;
                 if (binding.kind == ShaderRecompiler::DescriptorKind::SampledImage) {
@@ -3552,14 +3562,14 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
                         const auto resource = DecodeTextureResource(words);
                         const VkComponentMapping components = ViewComponents(resource);
                         const VkImageViewType multisampleViewType = binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2DMultisampleArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-                        if (textureIndex >= textures.size() || cachedTexture(context, words, resource, components, 0, !binding.imageDepthCompare.empty() && binding.imageDepthCompare.at(element), multisampleViewType) != textures[textureIndex]) return false;
+                        if (textureIndex >= textures.size() || cachedTexture(context, words, resource, components, 0, !binding.imageDepthCompare.empty() && binding.imageDepthCompare.at(element), multisampleViewType) != textures[textureIndex]) return miss("sampled texture", textureIndex);
                         ++textureIndex;
                     }
                 } else if (binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) {
                     for (std::uint32_t element = 0; element < binding.count; ++element) {
                         const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 8u, 8u);
                         if (IsNullTextureResource(words)) continue;
-                        if (storageIndex >= storageTextures.size()) return false;
+                        if (storageIndex >= storageTextures.size()) return miss("storage image past the build's", storageIndex, true);
                         if (partial) {
                             ++storageIndex;
                             continue;
@@ -3567,7 +3577,7 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
                         std::shared_ptr<StorageTexture> expected;
                         if (SameAsPreviousStorageElement(binding, element) && StorageDedupeEnabled()) expected = storageTextures[storageIndex - 1];
                         else expected = cachedStorageTexture(context, words, DecodeTextureResource(words), storageMips[storageIndex], 0, storageWritten[storageIndex]);
-                        if (expected != storageTextures[storageIndex]) return false;
+                        if (expected != storageTextures[storageIndex]) return miss("storage image", storageIndex, true);
                         ++storageIndex;
                     }
                 }
@@ -3576,7 +3586,7 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
         for (const auto& table : tableStages) {
             if (table.elementTextures.empty()) continue;
             const auto* images = tableImages(shaders, table.stage);
-            if (images == nullptr || images->count != table.elementTextures.size()) return false;
+            if (images == nullptr || images->count != table.elementTextures.size()) return miss("image table of another size at texture", textureIndex);
             std::vector<std::shared_ptr<Texture>> cached;
             if (auto* reused = FindReusedTable(context.device, *images, CurrentTableState()); reused != nullptr && TableCurrent(*reused) && CachedTableTextures(*reused, cached)) {
                 auto next = cached.begin();
@@ -3593,14 +3603,14 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
                     same = index == textureIndex && textureIndex < textures.size() && textures[textureIndex] == texture;
                     ++textureIndex;
                 }
-                if (!same) return false;
+                if (!same) return miss("reused image table at texture", textureIndex);
                 TextureCounts().tablesReused.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
             for (std::uint32_t element = 0; element < images->count; ++element) {
                 if (table.elementTextures[element] == std::numeric_limits<std::size_t>::max()) continue;
                 if (skipped(textureIndex)) {
-                    if (table.elementTextures[element] != textureIndex) return false;
+                    if (table.elementTextures[element] != textureIndex) return miss("image table element order at texture", textureIndex);
                     ++textureIndex;
                     continue;
                 }
@@ -3609,11 +3619,12 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
                 const auto words = firstLayerWords(raw, images->imageShapes.at(element), narrowed, false);
                 const auto resource = DecodeTextureResource(words);
                 const VkImageViewType multisampleViewType = images->imageShapes.at(element) == ShaderRecompiler::DescriptorImageShape::Image2DMultisampleArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-                if (textureIndex >= textures.size() || table.elementTextures[element] != textureIndex || cachedTexture(context, words, resource, ViewComponents(resource), 0, images->imageDepthCompare.at(element), multisampleViewType) != textures[textureIndex]) return false;
+                if (textureIndex >= textures.size() || table.elementTextures[element] != textureIndex || cachedTexture(context, words, resource, ViewComponents(resource), 0, images->imageDepthCompare.at(element), multisampleViewType) != textures[textureIndex]) return miss("image table texture", textureIndex);
                 ++textureIndex;
             }
         }
-        if (textureIndex != textures.size() || storageIndex != storageTextures.size()) return false;
+        if (textureIndex != textures.size()) return miss("texture count", textureIndex);
+        if (storageIndex != storageTextures.size()) return miss("storage image count", storageIndex, true);
         // The walk proved every object current again: the records move to what it proved, or one
         // spurious stamp (a label sharing a 64 KiB block with a surface's edge) would keep this
         // object on the full walk for good.
@@ -3629,6 +3640,10 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
     FastFail reason = FastFail::Count;
     bool accepted = false;
     const bool perUseFast = perUseTextures && PerUsePartialWalk();
+    if (!noFast && perUseFast && !fullWalk(true)) {
+        if (report != nullptr) report->path = ProofPath::Full;
+        return finish(false, false);
+    }
     bool fast = !noFast && (!perUseTextures || perUseFast) && fastRevalidate(serialBefore, refreshed, reason, overlapping, accepted);
     if (perUseTextures && !perUseFast) reason = FastFail::PerUse;
     // T1 (design_cpu_final M3, rule RT1): a Pending failure whose overlapping images are foreign
@@ -3658,9 +3673,9 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
     }
     if (report != nullptr) report->path = !fast ? ProofPath::Full : ownRefreshed ? ProofPath::OwnRefreshed : ProofPath::Fast;
     if (fast && perUseTextures) {
-        if (!fullWalk(true)) return finish(false, false);
         if (VerifyProofs() && !fullWalk(false)) {
-            std::fprintf(stderr, "[rescache] APS5_VERIFY_PROOFS: the per-use partial walk disagrees with the full walk\n");
+            const char* kind = mismatch.storage ? "storage" : mismatch.index < textures.size() && textures[mismatch.index]->RefreshedPerUse() ? "refreshed per use" : "not refreshed per use";
+            std::fprintf(stderr, "[rescache] APS5_VERIFY_PROOFS: the per-use partial walk and the fast proof disagree with the full walk at %s %zu (%s) of %zu textures and %zu storage images\n", mismatch.what != nullptr ? mismatch.what : "an unnamed check", mismatch.index, kind, textures.size(), storageTextures.size());
             std::fflush(stderr);
             std::abort();
         }
