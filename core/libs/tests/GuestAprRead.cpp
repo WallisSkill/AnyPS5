@@ -68,7 +68,7 @@ private:
 class DirectBuffer {
 public:
     DirectBuffer() {
-        Require(sceKernelAllocateDirectMemory(0, 12288ll << 20, MappingBytes, 0x4000, 0, &physical) == 0, "cannot allocate direct memory");
+        Require(sceKernelAllocateDirectMemory(0, 13824ll << 20, MappingBytes, 0x4000, 0, &physical) == 0, "cannot allocate direct memory");
         if (sceKernelMapDirectMemory(&pointer, MappingBytes, 0x33, 0, physical, 0x4000) != 0) {
             sceKernelReleaseDirectMemory(physical, MappingBytes);
 

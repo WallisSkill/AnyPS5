@@ -7,7 +7,7 @@
 
 #include "prx/libkernel/KernelErrors.hpp"
 
-static constexpr size_t DIRECT_MEMORY_SIZE = 12288ULL * 1024 * 1024;
+static constexpr size_t DIRECT_MEMORY_SIZE = 13824ULL * 1024 * 1024;
 static constexpr size_t PS5_PAGE_SIZE = 0x4000;
 
 #ifdef _WIN32

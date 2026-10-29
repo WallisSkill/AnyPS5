@@ -235,6 +235,7 @@ void TestKernelEventQueue() {
     Require(sceKernelAddAmprEvent(eq, 7, &userData) == 0);
     Recorder recorder;
     Require(sceAmprCommandBufferWriteKernelEventQueue_04_00(&recorder.buffer, static_cast<std::uint64_t>(eq), 7, 0x1234, 0) == 0);
+    RequireAppended(recorder, 0, 0, Apr::Opcode::WriteKernelEventQueue, sceAmprMeasureCommandSizeWriteKernelEventQueue_04_00(static_cast<std::uint64_t>(eq), 7, 0x1234));
     Require(sceKernelAprSubmitCommandBuffer(&recorder.buffer, 0) == 0);
     KernelEvent event{};
     int count = 0;
@@ -1148,6 +1149,101 @@ void TestAmmRemapKeepsPoolReferences() {
     Require(At(fresh) == 0xC1);
 }
 
+void TestAmmMapsScatteredPoolPages() {
+    std::uint64_t start = 0;
+    std::uint64_t end = 0;
+    std::uint64_t multimapStart = 0;
+    std::uint64_t multimapEnd = 0;
+    Require(sceAmprAmmGetVirtualAddressRanges(&start, &end, &multimapStart, &multimapEnd) == 0);
+    const auto exhausts = [](Recorder& recorder) {
+        try {
+            SubmitAmm(recorder);
+        } catch (const std::runtime_error& error) {
+            return std::string(error.what()).starts_with("AMM: no free run of ");
+        }
+        return false;
+    };
+    const auto drained = start + 1024 * page;
+    for (std::uint64_t index = 0;; ++index) {
+        Require(index < 4096);
+        Recorder drain;
+        Require(sceAmprAmmCommandBufferMap(&drain.buffer, drained + index * page, page, 0, cpuReadWrite) == 0);
+        if (exhausts(drain)) break;
+    }
+
+    std::int64_t pool = -1;
+    Require(sceAmprAmmGiveDirectMemory(0, static_cast<std::int64_t>(sceKernelGetDirectMemorySize()), 5 * page, page, 1, &pool) == 0);
+    const auto singles = start + 6144 * page;
+    Recorder maps;
+    for (std::uint64_t index = 0; index < 5; ++index) Require(sceAmprAmmCommandBufferMap(&maps.buffer, singles + index * page, page, 0, cpuReadWrite) == 0);
+    SubmitAmm(maps);
+    for (std::uint64_t index = 0; index < 5; ++index) At(singles + index * page) = 0x100 + index;
+
+    Recorder release;
+    for (const std::uint64_t index : {0, 2, 4}) Require(sceAmprAmmCommandBufferUnmap(&release.buffer, singles + index * page, page) == 0);
+    SubmitAmm(release);
+
+    const auto scattered = start + 6400 * page;
+    Recorder gather;
+    Require(sceAmprAmmCommandBufferMap(&gather.buffer, scattered, 3 * page, 0, cpuReadWrite) == 0);
+    SubmitAmm(gather);
+    for (std::uint64_t index = 0; index < 3; ++index) At(scattered + index * page) = 0x200 + index;
+    for (std::uint64_t index = 0; index < 3; ++index) Require(At(scattered + index * page) == 0x200 + index);
+    Require(At(singles + page) == 0x101 && At(singles + 3 * page) == 0x103);
+
+    Recorder empty;
+    Require(sceAmprAmmCommandBufferMap(&empty.buffer, singles, page, 0, cpuReadWrite) == 0);
+    Require(exhausts(empty));
+}
+
+void TestAmmPrtAllocationFailureKeepsZeros() {
+    std::uint64_t start = 0;
+    std::uint64_t end = 0;
+    std::uint64_t multimapStart = 0;
+    std::uint64_t multimapEnd = 0;
+    Require(sceAmprAmmGetVirtualAddressRanges(&start, &end, &multimapStart, &multimapEnd) == 0);
+    const auto exhausts = [](Recorder& recorder) {
+        try {
+            SubmitAmm(recorder);
+        } catch (const std::runtime_error& error) {
+            return std::string(error.what()).starts_with("AMM: no free run of ");
+        }
+        return false;
+    };
+    const auto drained = start + 24576 * page;
+    for (std::uint64_t index = 0;; ++index) {
+        Require(index < 4096);
+        Recorder drain;
+        Require(sceAmprAmmCommandBufferMap(&drain.buffer, drained + index * page, page, 0, cpuReadWrite) == 0);
+        if (exhausts(drain)) break;
+    }
+    std::int64_t pool = -1;
+    Require(sceAmprAmmGiveDirectMemory(0, static_cast<std::int64_t>(sceKernelGetDirectMemorySize()), page, page, 1, &pool) == 0);
+
+    const std::uint64_t prt = start + 28672 * page;
+    Recorder reserve;
+    Require(sceAmprAmmCommandBufferMapAsPrt(&reserve.buffer, prt, 4 * page) == 0);
+    SubmitAmm(reserve);
+    Require(At(prt) == 0 && At(prt + 3 * page) == 0);
+
+    Recorder tooMany;
+    Require(sceAmprAmmCommandBufferAllocatePaForPrt(&tooMany.buffer, prt + page, 2 * page, 0, cpuReadWrite) == 0);
+    Require(exhausts(tooMany));
+    Require(Protection(prt + page) == 0x10 && At(prt) == 0 && At(prt + page) == 0 && At(prt + 2 * page) == 0 && At(prt + 3 * page) == 0);
+
+    Recorder one;
+    Require(sceAmprAmmCommandBufferAllocatePaForPrt(&one.buffer, prt + page, page, 0, cpuReadWrite) == 0);
+    SubmitAmm(one);
+    Require(Protection(prt + page) == 0x03);
+    At(prt + page) = 0x61;
+    Require(At(prt + page) == 0x61 && At(prt) == 0 && At(prt + 2 * page) == 0);
+
+    Recorder none;
+    Require(sceAmprAmmCommandBufferAllocatePaForPrt(&none.buffer, prt + 2 * page, page, 0, cpuReadWrite) == 0);
+    Require(exhausts(none));
+    Require(At(prt + 2 * page) == 0 && At(prt + page) == 0x61);
+}
+
 void TestAmmMapFailureKeepsPoolOwnership() {
     std::uint64_t start = 0;
     std::uint64_t end = 0;
@@ -1374,6 +1470,26 @@ void TestAmmPrt() {
     Require(sceAmprAmmMeasureAmmCommandSizeAllocatePaForPrt(prt + 8, page, 0, cpuReadWrite) == ammRejected);
 }
 
+void TestWriteAddressCommand() {
+    Recorder recorder;
+    alignas(8) std::uint64_t target = 0;
+    const auto offset = recorder.Offset();
+    const auto commands = recorder.Commands();
+    Require(sceAmprCommandBufferWriteAddress_04_00(&recorder.buffer, &target, 0x1122334455667788ull, 0) == 0);
+    RequireAppended(recorder, offset, commands, Apr::Opcode::WriteAddress, sceAmprMeasureCommandSizeWriteAddress_04_00());
+    Apr::WriteAddressCommand command{};
+    std::memcpy(&command, recorder.memory.data() + offset, sizeof(command));
+    Require(command.address == reinterpret_cast<std::uint64_t>(&target) && command.value == 0x1122334455667788ull && command.flags == 0);
+    Require(sceAmprMeasureCommandSizeWriteAddress_04_00() == sizeof(Apr::WriteAddressCommand));
+    Require(sceAmprMeasureCommandSizeWriteKernelEventQueue_04_00(0, 0, 0) == sizeof(Apr::WriteKernelEventQueueCommand));
+    Require(sceAmprCommandBufferGetType(&recorder.buffer) == static_cast<std::uint32_t>(Apr::BufferType::Apr));
+    Require(sceKernelAprSubmitCommandBuffer(&recorder.buffer, 0) == 0);
+    Require(target == 0x1122334455667788ull);
+    Apr::CommandBufferObject generic{};
+    Require(sceAmprCommandBufferConstructor(&generic) == 0);
+    Require(sceAmprCommandBufferGetType(&generic) == static_cast<std::uint32_t>(Apr::BufferType::Generic));
+}
+
 void TestKernelWriteCommands() {
     std::uint64_t start = 0;
     std::uint64_t end = 0;
@@ -1467,6 +1583,7 @@ int main() {
     TestFullBuffer();
     TestOffsetPastBuffer();
     TestSubmission();
+    TestWriteAddressCommand();
     TestKernelEventQueue();
     TestWaits();
     TestWaitSatisfiedAfterSubmission();
@@ -1491,9 +1608,11 @@ int main() {
     TestAmmUsageStats();
     TestAmmRemapKeepsPoolReferences();
     TestAmmMapFailureKeepsPoolOwnership();
+    TestAmmMapsScatteredPoolPages();
     TestAmm();
     TestAmmRemapAndProtect();
     TestAmmPrt();
+    TestAmmPrtAllocationFailureKeepsZeros();
     TestKernelWriteCommands();
     return 0;
 }
