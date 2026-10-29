@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <stdexcept>
 #include <thread>
 
 static void Require(bool condition, const char* message) {
@@ -115,4 +116,27 @@ int main(int argc, char** argv) {
     Require(sem_getvalue_nid_postfix(&sem, &value) == 0 && value == 0, "failed timed waits must preserve the count");
     Require(sem_destroy_nid_postfix(&sem) == 0, "blocked semaphore destroy must succeed");
     CheckRetire();
+
+    Require(sem_init_nid_postfix(&sem, 0, 1) == 0, "renamed semaphore must initialize");
+    Require(sem_setname_nid_postfix(&sem, "semaphore") == 0, "first setname must succeed");
+    *__error_nid_postfix() = 0;
+    Require(sem_setname_nid_postfix(&sem, "other") == -1 && *__error_nid_postfix() == 35, "second setname must report EAGAIN");
+    *__error_nid_postfix() = 0;
+    Require(sem_setname_nid_postfix(&sem, "") == -1 && *__error_nid_postfix() == 35, "second setname with an empty name must report EAGAIN");
+    Require(sem_getvalue_nid_postfix(&sem, &value) == 0 && value == 1, "setname must preserve the count");
+    bool rejected = false;
+    try { sem_setname_nid_postfix(&sem, nullptr); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    Require(rejected, "null name must throw");
+    rejected = false;
+    try { sem_setname_nid_postfix(nullptr, "semaphore"); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    Require(rejected, "null semaphore must throw");
+    Require(sem_trywait_nid_postfix(&sem) == 0, "renamed semaphore must stay usable");
+    Require(sem_destroy_nid_postfix(&sem) == 0, "renamed semaphore destroy must succeed");
+    *__error_nid_postfix() = 0;
+    Require(sem_setname_nid_postfix(&sem, "semaphore") == -1 && *__error_nid_postfix() == 35, "destroyed semaphore must report EAGAIN like a zeroed one");
+    Require(sem_init_nid_postfix(&sem, 0, 0) == 0, "reinitialized semaphore must initialize");
+    Require(sem_setname_nid_postfix(&sem, "again") == 0, "a reinitialized semaphore can be named again");
+    Require(sem_destroy_nid_postfix(&sem) == 0, "reinitialized semaphore destroy must succeed");
 }
